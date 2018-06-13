@@ -27,6 +27,8 @@ import (
 	log "github.com/Sirupsen/logrus"
 )
 
+const defaultNetLimit = "20M"
+
 // NetLimit parse speed of interface that it has prefix of eth
 func NetLimit() string {
 	defer func() {
@@ -34,56 +36,64 @@ func NetLimit() string {
 			log.Errorf("parse default net limit error:%v", err)
 		}
 	}()
-	if runtime.NumCPU() >= 24 {
-		var ethtool string
-		if path, err := exec.LookPath("ethtool"); err == nil {
-			ethtool = path
-		} else if _, err := os.Stat("/usr/sbin/ethtool"); err == nil || os.IsExist(err) {
-			ethtool = "/usr/sbin/ethtool"
-		}
-		if ethtool == "" {
-			log.Warn("ethtool not found")
-		} else {
-			var maxInterfaceLimit = uint64(0)
-			if interfaces, err := net.Interfaces(); err == nil {
-				compile := regexp.MustCompile("^[[:space:]]*([[:digit:]]+)[[:space:]]*Mb/s[[:space:]]*$")
-				for _, dev := range interfaces {
-					if strings.HasPrefix(dev.Name, "eth") {
-						cmd := exec.Command(ethtool, dev.Name)
-						if stdoutPipe, err := cmd.StdoutPipe(); err == nil {
-							if err := cmd.Start(); err != nil {
-								log.Warnf("ethtool %s error:%v", dev.Name, err)
-							} else {
-								scanner := bufio.NewScanner(stdoutPipe)
-
-								for scanner.Scan() {
-									fields := strings.Split(strings.TrimSpace(scanner.Text()), ":")
-									if len(fields) == 2 {
-										if strings.ToLower(strings.TrimSpace(fields[0])) == "speed" {
-											speed := compile.FindStringSubmatch(fields[1])
-											if tmpLimit, err := strconv.ParseUint(speed[1], 0, 32); err == nil {
-												tmpLimit = tmpLimit * 8 / 10
-												if tmpLimit > maxInterfaceLimit {
-													maxInterfaceLimit = tmpLimit
-												}
-											}
-
-										}
-									}
-
-								}
-								cmd.Wait()
-							}
-
-						}
-					}
-				}
-			}
-			if maxInterfaceLimit > 0 {
-				return strconv.FormatUint(maxInterfaceLimit/8, 10) + "M"
-			}
-		}
+	if runtime.NumCPU() < 24 {
+		return defaultNetLimit
 	}
-	return "20M"
+	var ethtool string
+	if path, err := exec.LookPath("ethtool"); err == nil {
+		ethtool = path
+	} else if _, err := os.Stat("/usr/sbin/ethtool"); err == nil || os.IsExist(err) {
+		ethtool = "/usr/sbin/ethtool"
+	}
+	if ethtool == "" {
+		log.Warn("ethtool not found")
+		return defaultNetLimit
+	}
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return defaultNetLimit
+	}
+	var maxInterfaceLimit = uint64(0)
+	compile := regexp.MustCompile("^[[:space:]]*([[:digit:]]+)[[:space:]]*Mb/s[[:space:]]*$")
+	for _, dev := range interfaces {
+		if !strings.HasPrefix(dev.Name, "eth") {
+			continue
+		}
+		cmd := exec.Command(ethtool, dev.Name)
+		stdoutPipe, err := cmd.StdoutPipe()
+		if err != nil {
+			continue
+		}
+		err = cmd.Start()
+		if err != nil {
+			log.Warnf("ethtool %s error:%v", dev.Name, err)
+			continue
 
+		}
+		scanner := bufio.NewScanner(stdoutPipe)
+
+		for scanner.Scan() {
+			fields := strings.Split(strings.TrimSpace(scanner.Text()), ":")
+			if len(fields) != 2 {
+				continue
+			}
+			if strings.ToLower(strings.TrimSpace(fields[0])) != "speed" {
+				continue
+			}
+			speed := compile.FindStringSubmatch(fields[1])
+			tmpLimit, err := strconv.ParseUint(speed[1], 0, 32)
+			if err != nil {
+				continue
+			}
+			tmpLimit = tmpLimit * 8 / 10
+			if tmpLimit > maxInterfaceLimit {
+				maxInterfaceLimit = tmpLimit
+			}
+		}
+		cmd.Wait()
+	}
+	if maxInterfaceLimit == 0 {
+		return defaultNetLimit
+	}
+	return strconv.FormatUint(maxInterfaceLimit/8, 10) + "M"
 }
